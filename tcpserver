@@ -1,0 +1,37 @@
+
+        size_t total_received = 0;
+
+        while (total_received < real_piece_size) {
+            string download_message = recvMessage(peer_sock);
+            if (download_message.empty()) {
+                cerr << "Connection closed while downloading piece " << my_piece << endl;
+                close(peer_sock);
+                return;
+            }
+
+            ssize_t total_read = download_message.size();
+
+            // Trim for last piece
+            if (total_received + total_read > real_piece_size) {
+                total_read = real_piece_size - total_received;
+            }
+
+            // ✅ Thread-safe write using pwrite
+            ssize_t bytes_written = pwrite(fd, download_message.data(),
+                                           total_read,
+                                           write_offset + total_received);
+            if (bytes_written != total_read) {
+                cerr << "Error writing piece " << my_piece << endl;
+                close(peer_sock);
+                return;
+            }
+
+            total_received += total_read;
+        }
+
+        cout << "Thread " << this_thread::get_id()
+             << " finished piece " << my_piece << endl;
+
+        close(peer_sock);
+    }
+}

@@ -25,17 +25,6 @@ struct user
     int port;
 };
 
-// struct file_info{
-//     string file_name;
-//     int file_size;
-//     int piece_size;
-//     int no_of_pieces;
-//     vector<string> piece_hashes; // this is the sha256 hash of each piece
-//     map<int,vector<pair<struct user,string>>> seeders; // this is the map of piece number to the list of seeders for that piece
-//     // first int is the piece number and second is the list of seeders for that piece
-//     // struct user is the user info and string is the source address for that piece
-//     // map<string,vector<struct user>> leechers; // this is the map of file name to the list of leechers for that file
-// };
 struct group
 {
     string group_id;
@@ -43,9 +32,9 @@ struct group
     set<string>waitList;
     set<string> members;
     vector<string> piece_hashes = {}; // by default empty
-    map<string,map<int,map<string,string>>> files;
+    map<string,map<int,map<string,pair<string,string>>>> files;
     map<string,int> file_size; // file name to file size
-    //filename, piece no, username, file path
+    //filename, piece no, username, file path, hash value
     
 };
 
@@ -86,17 +75,40 @@ void sendMessage(int sock, const std::string &msg) {
         msg_bytes_left -= n;
     }
 }
-string recvMessage(int sock) {
+std::string recvMessage(int sock) {
+    // First, receive the 4-byte length prefix
     uint32_t netlen;
-    ssize_t n = recv(sock, &netlen, sizeof(netlen), MSG_WAITALL);
-    if (n <= 0) return ""; // connection closed or error
-
-    uint32_t len = ntohl(netlen); // convert to host order
-    string msg(len, '\0'); // allocate buffer
-
-    n = recv(sock, &msg[0], len, MSG_WAITALL);
-    if (n <= 0) return "";
-
+    char* len_ptr = (char*)&netlen;
+    size_t len_bytes_left = sizeof(netlen);
+    
+    while (len_bytes_left > 0) {
+        ssize_t n = recv(sock, len_ptr, len_bytes_left, 0);
+        if (n <= 0) {
+            perror("recv length failed");
+            return "";
+        }
+        len_ptr += n;
+        len_bytes_left -= n;
+    }
+    
+    uint32_t len = ntohl(netlen);
+    
+    // Now receive the actual message
+    std::string msg;
+    msg.resize(len);
+    char* msg_ptr = &msg[0];
+    size_t msg_bytes_left = len;
+    
+    while (msg_bytes_left > 0) {
+        ssize_t n = recv(sock, msg_ptr, msg_bytes_left, 0);
+        if (n <= 0) {
+            perror("recv message failed");
+            return "";
+        }
+        msg_ptr += n;
+        msg_bytes_left -= n;
+    }
+    
     return msg;
 }
 
@@ -192,12 +204,12 @@ string extract_base_filename(const string& file_path_full) {
         // If found, erase everything up to and including the slash
         filename.erase(0, last_slash + 1);
     }
-    size_t last_dot = filename.find_last_of('.');
+    // size_t last_dot = filename.find_last_of('.');
     
-    if (last_dot != std::string::npos && last_dot != 0) {
-        // If found, erase everything from the period to the end
-        filename.erase(last_dot);
-    }
+    // if (last_dot != std::string::npos && last_dot != 0) {
+    //     // If found, erase everything from the period to the end
+    //     filename.erase(last_dot);
+    // }
 
     return filename;
 }
@@ -239,6 +251,7 @@ void parse(vector<char *>&vec,int clientSocket,string username,string temp){
         }   
         else {
             user_base[username] = password;
+            sendMessage(clientSocket,"User created successfully!");
             update_tracker(temp,tracker2_fd,username);
         }
         
@@ -280,7 +293,6 @@ void parse(vector<char *>&vec,int clientSocket,string username,string temp){
             else{
                 cout << "invalid password!!" << endl;
             }
-            
         }
         
     }
@@ -290,7 +302,7 @@ void parse(vector<char *>&vec,int clientSocket,string username,string temp){
     }
     else if(cmd == "upload"){
         //the  we store the hash in the database
-        if(vec.size() != 7){
+        if(vec.size() != 8){
             cout << vec.size() << endl;
             cerr << "invalid args" << endl;
             return;
@@ -312,6 +324,10 @@ void parse(vector<char *>&vec,int clientSocket,string username,string temp){
             return; 
         }
         else if(vec[5] == nullptr){
+            cerr << "invalid Port_value" << endl;
+            return; 
+        }
+        else if(vec[6] == nullptr){
             cerr << "invalid hash_value" << endl;
             return; 
         }
@@ -320,8 +336,9 @@ void parse(vector<char *>&vec,int clientSocket,string username,string temp){
         string piece_id(vec[3]);
         string file_size_str(vec[4]);
         int file_size = stoi(file_size_str);
-
-        string hash_value(vec[5]);
+        string listen_port_str(vec[5]);
+        int listen_port = stoi(listen_port_str);
+        string hash_value(vec[6]);
         // int pieceNo = stoi(piece_id);
         string file_name = extract_base_filename(file_path);
         if(username == "INVALID"){
@@ -339,16 +356,21 @@ void parse(vector<char *>&vec,int clientSocket,string username,string temp){
         }
         groupInfo[groupId]->file_size[file_name] = file_size;
         int pieceNo = stoi(piece_id);
-
+        seed_info[username].second = listen_port;
         //-------------------------------------------
         pair<string,string> p = {username,file_path};
         // pair<int,vector<pair<string,string>>> pr = {pieceNo,{p}};
-        groupInfo[groupId]->files[file_name][pieceNo][username] = file_path;
+        groupInfo[groupId]->files[file_name][pieceNo][username] = {file_path, hash_value};
         groupInfo[groupId]->file_size[file_name] = file_size;
         cout << "debug: " << file_name << " " << pieceNo << " " << username << " " << file_path << endl;
         //-------------------------------------------
         cout << "hash stored successfully" << endl;
-        sendMessage(clientSocket,"hash stored successfully\n");
+
+        const int CHUNK_SIZE = 524288;
+        int total_chunks = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        if(stoi(piece_id) == total_chunks-1){
+            sendMessage(clientSocket,"hash stored successfully\n");
+        }
         // cout << "hash value is " << hash_value << endl; 
         update_tracker(temp,tracker2_fd,username);
         //no need to check if piece no is valid or not
@@ -358,6 +380,9 @@ void parse(vector<char *>&vec,int clientSocket,string username,string temp){
 
     }
     else if(cmd == "download"){
+        cout << "reached download" << endl;
+
+        
         if(vec.size() != 4){
             cerr << "invalid args" << endl;
             return;
@@ -374,19 +399,28 @@ void parse(vector<char *>&vec,int clientSocket,string username,string temp){
         string group_id = vec[1] ;
         string file_name = vec[2];
 
-        map<int,map<string,string>> seeders = groupInfo[group_id]->files[file_name];
+        map<int,map<string,pair<string,string>>> seeders = groupInfo[group_id]->files[file_name];
         
         string message;
         string header;
         //we first send the message of file size of the file to the client
-        header = "abcdef "  + to_string(groupInfo[group_id]->file_size[file_name]) + "\n";
+        header = "abcdef " + to_string(groupInfo[group_id]->file_size[file_name]) + " " + "\n";
+        // cout << "header length: " << endl;
+        // cout << "header hex: ";
+        for (size_t i = 0; i < header.size(); i++) {
+            cout << hex << (int)(unsigned char)header[i] << " ";
+        }
+
         cout << "header is " << header << endl;
         sendMessage(clientSocket,header);
+
         for(auto it:seeders){
             int piece_no = it.first;
             for(auto jt:it.second){
                 string username = jt.first;
-                string file_path = jt.second;
+                if(login_status[username] == false)continue;
+                string file_path = jt.second.first;
+                string hash_value = jt.second.second;
                 string ip = seed_info[username].first;
                 int port = seed_info[username].second;
                 string port_str = to_string(port);
@@ -394,16 +428,78 @@ void parse(vector<char *>&vec,int clientSocket,string username,string temp){
 
                 // Now we have piece_no, username, file_path
                 // We need to send this information to the client
-                message += to_string(piece_no) + " " + username + " " + ip + " " + port_str + " " + file_path + "\n";
-                
+                message += to_string(piece_no) + " " + username + " " + ip + " " + port_str + " " + file_path + " " + hash_value + "\n";
+                // cout << "debug: " << piece_no << " " << username << " " << ip << " " << port_str << " " << file_path << " " + hash_value << endl;
             }
         }
         message += "END_OF_FILE\n"; 
         cout << message << endl << flush;
         sendMessage(clientSocket, message);
+        cout << "sent file info with seeder information" << endl;
 
         // return;
 
+    }
+    else if(cmd == "have_piece"){
+        if(vec.size() != 7){
+            cout << "something wrong in the updation message" << endl;
+            return ;
+        }
+        int piece = 0;
+        string file_name;
+        string username;
+        string groupId;
+        string file_path;
+        string hash_value;
+        if(vec[1] != nullptr){
+            string piece_str(vec[1]);
+            piece = stoi(piece_str);
+        }
+        else {
+            cout << "error" << endl;
+            return ;
+        }
+        if(vec[2] != nullptr){
+            file_name = string(vec[2]);
+        }
+        else {
+            cout << "error" << endl;
+            return ;
+        }
+        if(vec[3] != nullptr){
+            username = string(vec[3]);
+        }
+        else {
+            cout << "error" << endl;
+            return ;
+        }
+        if(vec[4] != nullptr){
+            groupId = string(vec[3]);
+        }
+        else {
+            cout << "error" << endl;
+            return ;
+        }
+        if(vec[4] != nullptr){
+            file_path = string(vec[3]);
+        }
+        else {
+            cout << "error" << endl;
+            return ;
+        }
+        if(vec[5] != nullptr){
+            hash_value = string(vec[3]);
+        }
+        else {
+            cout << "error" << endl;
+            return ;
+        }
+        //we have to update the file info that we have another seeder available
+        groupInfo[groupId]->files[file_name][piece][username] = {file_path,hash_value};
+        //now new user will be able to use this as a seeder
+
+        
+        
     }
     //at this point the client should get its username
     else if(cmd == "list_files"){
@@ -511,7 +607,7 @@ void parse(vector<char *>&vec,int clientSocket,string username,string temp){
             }
         }
     }
-    else if(cmd == "accept_requests"){
+    else if(cmd == "accept_request"){
         if(vec.size() != 4){
             cout << "invalid arguments" << endl;
             return;
@@ -527,7 +623,7 @@ void parse(vector<char *>&vec,int clientSocket,string username,string temp){
                 groupInfo[id]->waitList.erase(waiting_user);
                 update_tracker(temp,tracker2_fd,username);
                 cout << "user accepted successfully" << endl;
-                sendMessage(clientSocket,"user accepted successfully\n");
+                sendMessage(clientSocket,"Joined group successfully\n");
             }
             else{
                cout << "No such pending request in accept_request" << endl;
@@ -614,25 +710,7 @@ void middle_ware(vector<char *>&vec,int clientSocket,string &temp){
     if(vec[0] == nullptr)return;
     string username(vec[0]);
     vec.erase(vec.begin());
-    // if(cmd == "FLAG"){
-    //     //this message is sent by the other tracker
-    //     //we should extract the username
-    //     string username(vec[1]);
-    //     //username can be invalid
-    //     vec.erase(vec.begin());
-    //     vec.erase(vec.begin());
-    //     parse(vector<char *>vec,clientSocket)
-        
-    // }
-    
-        //first will be username for sure
-    cout << "tokens for parse are" << endl;
-    for(int i=0;i<vec.size();i++){
-        if(vec[i]!= nullptr){
-            cout << string(vec[i]) << endl;
-        }
-    }
-    cout << ":end of midware" << endl;
+
     parse(vec,clientSocket,username,temp);
     
     
@@ -644,53 +722,30 @@ void p_execution(int clientSocket){
     bool loginStatus = false;
     //we need to connect to the second_tracker
     
-    // int _id = sequence_no++;
-    // string s_id = to_string(_id);
-    // sendMessage(clientSocket,s_id);
-    while(true){
-        // cout << "> ";
-        // memset(&buffer[0],0,sizeof(buffer));
         cout << clientSocket << endl;
         // cout << "atleast here" << endl;
-        int size; //size is like a buffer to store data , in my case it's like 
-        int read = recv(clientSocket,&size,sizeof(size),MSG_WAITALL); // here read denotes the amount of data read
-        if(read < 0){
+    while (true) {
+        // Use your robust recvMessage
+        string msg = recvMessage(clientSocket);
+        if (msg.empty()) {
             cout << "other tracker is now disconnected" << endl;
             close(clientSocket);
             return;
-            
         }
-        //size amount it is goint to recieve
-        
-        else {
-            int t = ntohl(size);
-            cout << "this size of data is " << t << endl;
-            string buffer(t,'\n');
-            read = recv(clientSocket,&buffer[0],t,MSG_WAITALL);
-            // cout << "this size of data is " << size << endl;
-            if(read < 0)cout << "error" << endl;
-            else if(read == 0)cout << "nothing to read" << endl;
-            else{
-                // cout << "client sent " << string(buffer) << endl;
-                string temp = buffer;
-                cout << "message is " << temp << endl;    
-                vector<char*> args = tokenise(buffer);
-                bool send_next = false;
-                middle_ware(args,clientSocket,temp);
 
-                cout << "reached end1" << endl;
- 
-                // for(auto it:login_status){
-                //     cout << it.first << " " << it.second << endl;
-                // }
-                string  reply = "server got: " + string(buffer) + "\n";
-                // sleep(5);
-                cout << reply << endl << flush << endl;
-                // cout << "login status is " << login_status[clientSocket] << endl;fclien
-                if(!send_next)sendMessage(clientSocket,reply);
-                // cout << "reached end" << endl;
-            }
-        }
+        cout << "message is: " << msg << endl;
+
+        // Tokenize and pass into your middleware
+        vector<char*> args = tokenise(msg);
+        middle_ware(args, clientSocket, msg);
+
+        cout << "reached end1" << endl;
+
+        // If you want to send acknowledgment back:
+        string reply = "server got: " + msg;
+        // sendMessage(clientSocket, reply);   // use sendMessage, not raw send
+        cout << reply << endl << flush;
+        
     }
 
 }
@@ -702,15 +757,22 @@ int main(){
     cout << port_fd << endl;
     const char* ip = "127.0.0.1";
     tracker2_fd = connect_to_tracker_2(54001,ip);
-
+    int count = 0;
     while(1){
 
         sockaddr_in client;  
         socklen_t clientSize = sizeof(client);
         // char host[NI_MAXHOST];
         // char svc[NI_MAXHOST];
-        
+        //first will be primary and rest will be client
         int clientSocket = accept(port_fd,(sockaddr *)&client,&clientSize);
+        // if(count == 1){
+        //     //clients are connecting i.e 1st tracker lost connection
+        //     for(auto it : login_status){
+        //         login_status[it.first] = false;
+        //     }
+        // }
+        count++;
         if(clientSocket == -1){
             cerr <<"problem with client connections";
             return -4;

@@ -1,0 +1,391 @@
+#include <bits/stdc++.h>
+#include <iostream>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <string.h>
+#include <arpa/inet.h>
+#include <thread>
+#include <unistd.h>
+// #include <winsock.h>
+#include <string>
+#include <vector>
+#include "connect_to_tracker.h"
+// #include "createconnection.h"
+// #include "thread_spawn.h"
+
+using namespace std;
+int tracker2_fd = 0;
+struct group
+{
+    int group_id;
+    int owner;
+    set<int>waitList;
+    set<int> members;
+};
+
+int sequence_number = 0;
+
+
+void sendMessage(int sock, const std::string &msg) {
+    // cout << "probelm heere" << endl;
+    uint32_t len = msg.size();
+    uint32_t netlen = htonl(len);  // convert to network byte order (big endian)
+    int sent = 0;
+    // Send length first
+    send(sock, &netlen, sizeof(netlen), 0);
+    // cout << "problem reached here" << endl;
+    // cout << "lenght" << len <<  "sent = " << sent << endl;
+    // Send message data
+    while (sent < len) {
+        // cout << "reachere" << endl;
+        ssize_t n = send(sock, msg.c_str() + sent, len - sent, 0);
+        // cout << "and   here" << endl;
+        if (n <= 0) {
+            perror("send");            // prints system error string
+            // std::cerr << "n=" << n << " errno=" << errno << std::endl;
+            break;// don’t just return silently
+        }
+        sent += n;
+        // cout << "sent so far: " << sent << std::endl;
+    }
+
+    // cout << "problem exit" << endl;
+
+}
+
+int create_connection(int port){
+    int listening = socket(AF_INET,SOCK_STREAM,0);
+    if(listening < 0){
+        cerr << "Unable to create socket";
+        return -1;
+    }
+    int enable = 1;
+    if (setsockopt(listening, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+        cerr << "setsockopt(SO_REUSEADDR) failed" << endl;
+        // Optionally, you can return an error here, but the program can continue.
+    }
+    // no we need to bind the socket to IP / port
+    sockaddr_in hint;
+    memset(&hint,0,sizeof(hint));
+    hint.sin_family = AF_INET;
+    hint.sin_port = htons(port);  
+    inet_pton(AF_INET, "0.0.0.0", &hint.sin_addr);
+    // now we need to bind to local port
+    
+    if(bind(listening, (sockaddr *)&hint ,sizeof(hint)) == -1){
+        cerr << "Cant bind to IP";
+        return -2;
+    }
+    
+    //mark the port as listening
+    //  2nd param is how many backlog can be there
+    if(listen(listening,SOMAXCONN) == -1){
+        cerr << "Cant listen" << endl;
+        return -3;
+    }
+    return listening;
+    
+}
+
+//-------------------------------------------------------------------------------
+
+map <string,string> user_base;
+// map <string,string> IsLoggedIn;
+// map <int,vector<int>> createGroup;
+map <int ,group*> groupInfo;
+map<int, group*> waitList;
+map<int,bool> login_status;
+
+//-------------------------------------------------------------------------------
+// map <int,
+
+vector<char*> tokenise(string &s) {
+    vector<char*> args;
+    // string temp = s;
+    char* start = &s[0];
+    char *token = strtok(start, " ");
+    while(token != nullptr){
+        // cout << token << endl;   // this is why you see the 2nd "ls" printed
+        if (strlen(token) > 0) {       // skip empty tokens
+            args.push_back(token);
+        }
+        token = strtok(nullptr, " ");
+    }
+    args.push_back(nullptr); // sentinel for execvp
+    return args;
+}
+
+// void login()
+void parse(vector<char *>&vec,string &s,bool &loginStatus,bool &tracker_comms,int clientSocket){
+    cout << "clientsocket is " << clientSocket  << endl;
+    // cout << "reached parse" << endl;
+    
+    // cout << vec.size() << endl;
+    // for(int i=0;i<vec.size();i++){
+    //     if(vec[i] != nullptr){
+    //         string ans(vec[i]);
+    //         cout << ans << endl;
+    //     }
+    // }
+    // return;
+ 
+    string cmd(vec[0]);
+    cout << cmd << endl;
+    if(cmd == "FLAG"){
+        //handle sync
+        cout << "this message is intended to sync" << endl;
+        string csocket(vec[1]); //it is guaranteed that vec[1] will exist;
+        clientSocket = stoi(csocket);
+        tracker_comms = true;
+        // vec[0] = nullptr;
+        vec.erase(vec.begin());
+        vec.erase(vec.begin());
+        parse(vec,s,loginStatus,tracker_comms,clientSocket);
+        return;
+    }
+    else if(cmd == "create_user"){
+        if(vec.size() != 4){
+            cerr << "invalid args" << endl;
+            return;
+        }
+        cout << "created user " << endl;
+        string username(vec[1]);
+        string password(vec[2]);
+        user_base[username] = password;
+        login_status[clientSocket] = false;
+        
+    }
+    else if(cmd == "login"){
+        cout << vec.size() << endl; 
+        for(int i=0;i<vec.size();i++){
+            if(vec[i] != nullptr){
+                string ans(vec[i]);
+                cout << ans << endl;
+            }
+        }
+        if(vec.size() != 4){
+            cerr << "invalid args" << endl;
+            return;
+        }
+        string username(vec[1]);
+        string password(vec[2]);
+        if(user_base.find(username) == user_base.end()){
+            cerr << "invalid username" << endl;
+            return;
+        }
+        else{
+            if(user_base[username] == password){
+                login_status[clientSocket] = true;
+                cout << "Welcome " << username << endl; 
+            }
+            else{
+                cout << "invalid password!!" << endl;
+            }
+            // loginStatus = true;
+        }
+
+    }
+    else if(login_status[clientSocket] == false){
+        cout << "you first need to login" << endl;
+        return;
+    }
+    else if(cmd == "create_group"){
+        //this should return the local sequence number
+
+        //args size must be 3
+        if(vec.size() != 3){
+            cerr << "invalid arguments" << endl;
+        }
+        string str_groupId(vec[1]);
+        int groupId = stoi(str_groupId);
+        vector<int> vec;
+        group *newGroup = new group;
+        newGroup->group_id = groupId;
+        newGroup->owner = clientSocket;
+        groupInfo[groupId] = newGroup;
+        // newGroup.members = vec;
+
+    }
+    else if(cmd == "join_group"){
+        //when i join a group i should be able to insert my fd into that group
+        if(vec.size() != 3){
+            cout << "invalid arguments" << endl;
+        }
+        string str_groupId(vec[1]);
+        int id = stoi(str_groupId);
+        if(groupInfo.find(id) == groupInfo.end()){
+            cout << "invalid group id" << endl;
+        }
+        else{
+            groupInfo[id]->waitList.insert(clientSocket);
+            cout << "added to waitlist successfully" << endl;
+        }
+    }
+    else if(cmd == "leave_group"){
+
+        if(vec.size() != 3){
+            cout << "invalid arguments" << endl;
+        }
+        string str_groupId(vec[1]);
+        int id = stoi(str_groupId);
+        if(groupInfo.find(id) == groupInfo.end()){
+            cout << "invalid group id" << endl;
+        }
+        else{
+            groupInfo[id]->members.erase(clientSocket);
+            cout << "removed from group successfully" << endl;
+        }
+        
+    }
+    else if(cmd == "list_group"){
+        if(vec.size() != 2){
+            cout << "invalid arguments" << endl;
+            return;
+        }
+        cout << "group size " << groupInfo.size() << endl; 
+        for(auto it:groupInfo){
+            cout << it.first << endl;
+        }
+    }
+    else if(cmd == "list_requests"){
+        if(vec.size() != 3){
+            cout << "invalid arguments" << endl;
+            return;
+        }
+        string str_groupId(vec[1]);
+        int id = stoi(str_groupId);
+        if(groupInfo[id]->owner == clientSocket){
+            for(auto it:groupInfo[id]->waitList){
+                cout << it << endl;
+            }
+        }
+        else{
+            cerr << "permission denied" << endl;
+            return;
+        }
+        return;
+    }
+    else if(cmd == "accept_request"){
+        if(vec.size() != 4){
+            cout << "invalid arguments" << endl;
+            return;
+        }
+        string str_groupId(vec[1]);
+        int id = stoi(str_groupId);
+        string waiting_user(vec[2]);
+        int user_wait = stoi(waiting_user);
+        if(groupInfo[id]->owner == clientSocket){
+            //the owner will enter this area
+            if(groupInfo[id]->waitList.find(user_wait) != groupInfo[id]->waitList.end()){
+                //user exist in waitlist
+                groupInfo[id]->members.insert(user_wait);
+                groupInfo[id]->waitList.erase(user_wait);
+
+            }
+            else{
+               cout << "No such pending request in accept_request" << endl;
+            }
+        }
+        else{
+            cerr << "permission denied" << endl;
+            return;
+        }
+        return;
+    }
+    else if(cmd == "logout"){
+        exit(0);
+    }
+    
+}
+void update_tracker(string &message,int tracker_fd, int clientSocket){
+
+    string socket_in_string =  to_string(clientSocket);
+    // string message = "connected to server 1";
+    string temp = "FLAG " + socket_in_string + " "+ message;
+    sendMessage(tracker_fd,temp); 
+    // close(tracker_fd);
+}
+
+
+void p_execution(int clientSocket){
+    bool loginStatus = false;
+    //we need to connect to the second_tracker
+    
+    while(true){
+        
+        // memset(&buffer[0],0,sizeof(buffer));
+        cout << clientSocket << endl;
+        // cout << "atleast here" << endl;
+        int size; //size is like a buffer to store data , in my case it's like 
+        int read = recv(clientSocket,&size,sizeof(size),MSG_WAITALL); // here read denotes the amount of data read
+        if(read <= 0){
+            cout << "other tracker is now disconnected" << endl;
+            return;
+            
+        }
+        //size amount it is goint to recieve
+        
+        else {
+            int t = ntohl(size);
+            string buffer(t,'\n');
+            read = recv(clientSocket,&buffer[0],t,MSG_WAITALL);
+            if(read < 0)cout << "error" << endl;
+            else if(read == 0)cout << "nothing to read" << endl;
+            else{
+                cout << "client sent " << string(buffer) << endl;
+                string temp = buffer;
+                vector<char*> args = tokenise(buffer);
+                bool send_next = false;
+                parse(args,buffer,loginStatus,send_next,clientSocket);
+
+                if(!send_next)update_tracker(temp,tracker2_fd,clientSocket); 
+
+                //here we need to send the update the tracker2
+                //the values stored in login_status are
+                // string sender(args[args.size()-2]);
+                for(auto it:login_status){
+                    cout << it.first << " " << it.second << endl;
+                }
+                string  reply = "server got: " + string(buffer) + '\n';
+                // sleep(5);
+                cout << reply << endl;
+                // cout << "login status is " << login_status[clientSocket] << endl;fclien
+                if(!send_next)sendMessage(clientSocket,reply);
+                // cout << "reached end" << endl;
+            }
+        }
+    }
+
+}
+
+int main(){
+    //create a socket
+    int port_fd = create_connection(54000); // this port is used for listening for upcoming request;
+    // fd_set fr,fw,fe;  
+    cout << port_fd << endl;
+    //i can wait for the tracker 2 to become online with a timeout
+    const char* ip = "127.0.0.1";
+    tracker2_fd = connect_to_tracker_2(54001,ip);
+    //should i create a new thread here 
+    //it will be responsible for handling tracker to tracker comms
+    // thread th(handle_tracker_comms,tracker_2_fd);
+    
+    //first we need to set it
+    while(1){
+
+        sockaddr_in client;  
+        socklen_t clientSize = sizeof(client);
+        // char host[NI_MAXHOST];
+        // char svc[NI_MAXHOST];
+        
+        int clientSocket = accept(port_fd,(sockaddr *)&client,&clientSize);
+        if(clientSocket == -1){
+            cerr <<"problem with client connections";
+            return -4;
+        }
+        else cerr << "accepted successfully" << endl;
+        thread th(p_execution,clientSocket);    
+        th.detach();
+    }
+  
+}

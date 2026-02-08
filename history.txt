@@ -1,0 +1,26 @@
+ls
+cd leet
+ls
+cd Aos_bash
+cd Assignment1
+ls
+g++ chatgpt_segtree.cpp
+./a.out
+
+        string hash_str;
+        if (my_piece == total_pieces - 1 && buffer.size() != piece_size) {
+            // Recompute hash for the actual size of the last piece
+            unsigned char last_hash[SHA_DIGEST_LENGTH];
+            SHA_CTX last_ctx;
+            SHA1_Init(&last_ctx);
+            SHA1_Update(&last_ctx, buffer.data(), buffer.size());
+            SHA1_Final(last_hash, &last_ctx);
+            char last_hexbuf[SHA_DIGEST_LENGTH * 2 + 1];
+            for (int j = 0; j < SHA_DIGEST_LENGTH; j++) {
+            sprintf(&last_hexbuf[j*2], "%02x", last_hash[j]);
+            }
+            last_hexbuf[SHA_DIGEST_LENGTH * 2] = '\0';
+            hash_str = string(last_hexbuf);
+        } else {
+            hash_str = string(hexbuf);
+        }
